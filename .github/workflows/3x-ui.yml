@@ -29,6 +29,8 @@ jobs:
           XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
           XUI_PANEL_USERNAME: ${{ secrets.XUI_PANEL_USERNAME }}
           XUI_PANEL_PASSWORD: ${{ secrets.XUI_PANEL_PASSWORD }}
+          ADAPTER_URL: ${{ secrets.ADAPTER_URL }}
+          ADAPTER_REGISTER_TOKEN: ${{ secrets.ADAPTER_REGISTER_TOKEN }}
         run: |
           set -e
 
@@ -44,6 +46,16 @@ jobs:
 
           if [ -z "$XUI_PANEL_PASSWORD" ]; then
             echo "ERROR: XUI_PANEL_PASSWORD secret is not configured."
+            exit 1
+          fi
+
+          if [ -z "$ADAPTER_URL" ]; then
+            echo "ERROR: ADAPTER_URL secret is not configured."
+            exit 1
+          fi
+
+          if [ -z "$ADAPTER_REGISTER_TOKEN" ]; then
+            echo "ERROR: ADAPTER_REGISTER_TOKEN secret is not configured."
             exit 1
           fi
 
@@ -242,10 +254,14 @@ jobs:
           cloudflared --version
 
       - name: Start Cloudflare Quick Tunnel
+        env:
+          ADAPTER_URL: ${{ secrets.ADAPTER_URL }}
+          ADAPTER_REGISTER_TOKEN: ${{ secrets.ADAPTER_REGISTER_TOKEN }}
         run: |
           set -e
 
           PANEL_PORT="${{ steps.panel-url.outputs.PANEL_PORT }}"
+          BASE_PATH="${{ steps.panel-url.outputs.BASE_PATH }}"
 
           echo "=============================================="
           echo "STARTING CLOUDFLARE QUICK TUNNEL"
@@ -278,20 +294,39 @@ jobs:
 
           if [ -z "$TUNNEL_URL" ]; then
             echo "ERROR: Cloudflare Tunnel URL was not detected."
-            echo
             cat /tmp/cloudflared.log
             exit 1
           fi
 
           echo "=============================================="
-          echo "CLOUDFLARE PANEL URL"
+          echo "REGISTERING QUICK TUNNEL"
           echo "=============================================="
 
-          echo "${TUNNEL_URL}${{ steps.panel-url.outputs.BASE_PATH }}"
+          REGISTER_RESPONSE=$(curl \
+            --fail \
+            --silent \
+            --show-error \
+            -X POST \
+            "${ADAPTER_URL}/_adapter/register" \
+            -H "Authorization: Bearer ${ADAPTER_REGISTER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"tunnel\":\"${TUNNEL_URL}\"}")
+
+          echo "$REGISTER_RESPONSE"
+
+          echo "=============================================="
+          echo "PUBLIC PANEL URL"
+          echo "=============================================="
+
+          echo "${ADAPTER_URL}${BASE_PATH}"
+
+          echo
+          echo "Quick Tunnel:"
+          echo "${TUNNEL_URL}${BASE_PATH}"
 
           echo
           echo "=============================================="
-          echo "CLOUDFLARE TUNNEL STATUS"
+          echo "CLOUDFLARE TUNNEL"
           echo "=============================================="
 
           ps -p "$CLOUDFLARED_PID"
@@ -366,6 +401,8 @@ jobs:
       - name: Keep 3X-UI alive and backup periodically
         env:
           XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
+          ADAPTER_URL: ${{ secrets.ADAPTER_URL }}
+          ADAPTER_REGISTER_TOKEN: ${{ secrets.ADAPTER_REGISTER_TOKEN }}
         run: |
           set -e
 
@@ -399,9 +436,42 @@ jobs:
                 --url "http://127.0.0.1:${PANEL_PORT}" \
                 > /tmp/cloudflared.log 2>&1 &
 
-              sleep 10
+              TUNNEL_URL=""
 
-              echo "Cloudflare Tunnel restarted."
+              for i in $(seq 1 30); do
+                sleep 2
+
+                TUNNEL_URL=$(grep -oE \
+                  'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+                  /tmp/cloudflared.log \
+                  | tail -1 || true)
+
+                if [ -n "$TUNNEL_URL" ]; then
+                  break
+                fi
+              done
+
+              if [ -z "$TUNNEL_URL" ]; then
+                echo "ERROR: New Quick Tunnel URL was not detected."
+                cat /tmp/cloudflared.log
+                exit 1
+              fi
+
+              echo "Registering new Quick Tunnel..."
+
+              curl \
+                --fail \
+                --silent \
+                --show-error \
+                -X POST \
+                "${ADAPTER_URL}/_adapter/register" \
+                -H "Authorization: Bearer ${ADAPTER_REGISTER_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data "{\"tunnel\":\"${TUNNEL_URL}\"}"
+
+              echo
+              echo "New tunnel registered:"
+              echo "$TUNNEL_URL"
             fi
 
             echo "Creating periodic backup..."
