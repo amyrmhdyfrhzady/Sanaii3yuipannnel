@@ -50,6 +50,8 @@ jobs:
         env:
           XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
         run: |
+          set -e
+
           BACKUP=".xui-backup/x-ui-backup.tar.gz.enc"
           CHECKSUM=".xui-backup/x-ui-backup.sha256"
 
@@ -83,21 +85,22 @@ jobs:
             -out /tmp/x-ui-backup.tar.gz \
             -pass "pass:$XUI_BACKUP_KEY"
 
-          echo "Restoring files..."
+          echo "Restoring configuration..."
 
-          sudo rm -rf /etc/x-ui/*
+          sudo rm -rf /etc/x-ui
+          sudo mkdir -p /etc/x-ui
+
           sudo tar \
             -xzf /tmp/x-ui-backup.tar.gz \
-            -C /etc
-
-          if [ -d /tmp/x-ui-cert ]; then
-            sudo mkdir -p /root/cert
-            sudo cp -a /tmp/x-ui-cert/. /root/cert/
-          fi
-
-          rm -f /tmp/x-ui-backup.tar.gz
+            -C /
 
           sudo chown -R root:root /etc/x-ui
+
+          if [ -d /root/cert ]; then
+            sudo chown -R root:root /root/cert
+          fi
+
+          sudo rm -f /tmp/x-ui-backup.tar.gz
 
           echo "=============================================="
           echo "Previous configuration restored."
@@ -113,10 +116,21 @@ jobs:
       - name: Get 3X-UI panel information
         run: |
           echo "=============================================="
-          echo "3X-UI PANEL"
+          echo "3X-UI PANEL SETTINGS"
           echo "=============================================="
 
           sudo x-ui settings || true
+
+          echo
+          echo "=============================================="
+          echo "3X-UI LOGIN CREDENTIALS"
+          echo "=============================================="
+
+          if sudo test -f /etc/x-ui/install-result.env; then
+            sudo cat /etc/x-ui/install-result.env
+          else
+            echo "install-result.env not found."
+          fi
 
           echo
           echo "=============================================="
@@ -131,6 +145,14 @@ jobs:
           echo "=============================================="
 
           sudo ss -lntp | grep -E 'x-ui|LISTEN' || true
+
+          echo
+          echo "=============================================="
+          echo "PUBLIC IP"
+          echo "=============================================="
+
+          curl -4 -s https://api.ipify.org
+          echo
 
       - name: Check 3X-UI
         run: |
@@ -147,27 +169,6 @@ jobs:
 
           sudo ss -lntup || true
 
-      - name: Show panel credentials
-        run: |
-          echo
-          echo "=============================================="
-          echo "3X-UI PANEL INFORMATION"
-          echo "=============================================="
-
-          if [ -f /etc/x-ui/install-result.env ]; then
-            sudo cat /etc/x-ui/install-result.env
-          else
-            echo "install-result.env not found."
-          fi
-
-          echo
-          echo "=============================================="
-          echo "PUBLIC IP"
-          echo "=============================================="
-
-          curl -4 -s https://api.ipify.org
-          echo
-
       - name: Create initial backup
         env:
           XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
@@ -177,18 +178,21 @@ jobs:
           sudo systemctl stop x-ui
 
           sudo rm -rf /tmp/xui-backup-work
-          
-          mkdir -p /tmp/xui-backup-work
+          sudo rm -f /tmp/x-ui-backup.tar.gz
+
+          sudo mkdir -p /tmp/xui-backup-work/etc
+          sudo mkdir -p /tmp/xui-backup-work/root
+
           mkdir -p .xui-backup
 
           echo "Creating 3X-UI backup..."
 
           sudo cp -a /etc/x-ui \
-            /tmp/xui-backup-work/x-ui
+            /tmp/xui-backup-work/etc/x-ui
 
           if [ -d /root/cert ]; then
             sudo cp -a /root/cert \
-              /tmp/xui-backup-work/cert
+              /tmp/xui-backup-work/root/cert
           fi
 
           sudo tar \
@@ -255,14 +259,17 @@ jobs:
             sudo systemctl stop x-ui
 
             sudo rm -rf /tmp/xui-backup-work
-            mkdir -p /tmp/xui-backup-work
+            sudo rm -f /tmp/x-ui-backup.tar.gz
+
+            sudo mkdir -p /tmp/xui-backup-work/etc
+            sudo mkdir -p /tmp/xui-backup-work/root
 
             sudo cp -a /etc/x-ui \
-              /tmp/xui-backup-work/x-ui
+              /tmp/xui-backup-work/etc/x-ui
 
             if [ -d /root/cert ]; then
               sudo cp -a /root/cert \
-                /tmp/xui-backup-work/cert
+                /tmp/xui-backup-work/root/cert
             fi
 
             sudo tar \
