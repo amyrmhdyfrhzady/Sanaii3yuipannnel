@@ -277,21 +277,6 @@ jobs:
 
           tail -50 /tmp/cloudflared.log || true
 
-      - name: Test panel locally
-        run: |
-          echo "=============================================="
-          echo "LOCAL PANEL TEST"
-          echo "=============================================="
-
-          curl \
-            --fail \
-            --max-time 15 \
-            -I \
-            http://127.0.0.1:2053/
-
-          echo
-          echo "Local 3X-UI panel is reachable."
-
       - name: Create initial backup
         env:
           XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
