@@ -110,6 +110,28 @@ jobs:
 
           sleep 5
 
+      - name: Get 3X-UI panel information
+        run: |
+          echo "=============================================="
+          echo "3X-UI PANEL"
+          echo "=============================================="
+
+          sudo x-ui settings || true
+
+          echo
+          echo "=============================================="
+          echo "CONFIG FILES"
+          echo "=============================================="
+
+          sudo find /etc/x-ui -maxdepth 2 -type f -print
+
+          echo
+          echo "=============================================="
+          echo "LISTENING PORTS"
+          echo "=============================================="
+
+          sudo ss -lntp | grep -E 'x-ui|LISTEN' || true
+
       - name: Check 3X-UI
         run: |
           echo "=============================================="
