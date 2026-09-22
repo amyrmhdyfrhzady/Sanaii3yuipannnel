@@ -232,7 +232,7 @@ jobs:
 
             sudo systemctl stop x-ui
 
-            rm -rf /tmp/xui-backup-work
+            sudo rm -rf /tmp/xui-backup-work
             mkdir -p /tmp/xui-backup-work
 
             sudo cp -a /etc/x-ui \
@@ -261,8 +261,8 @@ jobs:
               .xui-backup/x-ui-backup.tar.gz.enc \
               > .xui-backup/x-ui-backup.sha256
 
-            rm -rf /tmp/xui-backup-work
-            rm -f /tmp/x-ui-backup.tar.gz
+            sudo rm -rf /tmp/xui-backup-work
+            sudo rm -f /tmp/x-ui-backup.tar.gz
 
             sudo systemctl start x-ui
 
