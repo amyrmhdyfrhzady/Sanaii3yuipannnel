@@ -130,13 +130,26 @@ jobs:
         run: |
           set -e
 
-          echo "Setting 3X-UI username and password..."
+          echo "Resetting 3X-UI login credentials..."
 
-          sudo x-ui setting \
-            -username "$XUI_PANEL_USERNAME" \
-            -password "$XUI_PANEL_PASSWORD"
+          sudo systemctl stop x-ui
 
-          echo "3X-UI login credentials configured."
+          sudo /usr/local/x-ui/x-ui setting \
+
+          -username "$XUI_PANEL_USERNAME" \
+
+          -password "$XUI_PANEL_PASSWORD" \
+          -resetTwoFactor=true
+
+          echo "3X-UI credentials reset successfully."
+
+          sudo systemctl start x-ui
+
+          sleep 5
+
+          echo "Current panel settings:"
+
+          sudo /usr/local/x-ui/x-ui setting -show true || true
 
       - name: Start 3X-UI
         run: |
