@@ -19,25 +19,24 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -e
+
           sudo apt-get update
           sudo apt-get install -y curl openssl git
 
-      - name: Check backup secret
+      - name: Check secrets
         env:
           XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
+          XUI_PANEL_USERNAME: ${{ secrets.XUI_PANEL_USERNAME }}
+          XUI_PANEL_PASSWORD: ${{ secrets.XUI_PANEL_PASSWORD }}
         run: |
+          set -e
+
           if [ -z "$XUI_BACKUP_KEY" ]; then
             echo "ERROR: XUI_BACKUP_KEY secret is not configured."
             exit 1
           fi
 
-          mkdir -p .xui-backup
-
-      - name: Check panel credentials
-        env:
-          XUI_PANEL_USERNAME: ${{ secrets.XUI_PANEL_USERNAME }}
-          XUI_PANEL_PASSWORD: ${{ secrets.XUI_PANEL_PASSWORD }}
-        run: |
           if [ -z "$XUI_PANEL_USERNAME" ]; then
             echo "ERROR: XUI_PANEL_USERNAME secret is not configured."
             exit 1
@@ -48,13 +47,17 @@ jobs:
             exit 1
           fi
 
-          echo "Panel credentials are configured."
+          mkdir -p .xui-backup
+
+          echo "All required secrets are configured."
 
       - name: Install 3X-UI
         env:
           XUI_NONINTERACTIVE: "1"
           XUI_SSL_MODE: "none"
         run: |
+          set -e
+
           curl -fsSL \
             https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh \
             | sudo -E bash
@@ -102,6 +105,8 @@ jobs:
             -out /tmp/x-ui-backup.tar.gz \
             -pass "pass:$XUI_BACKUP_KEY"
 
+          echo "Backup decrypted."
+
           echo "Restoring configuration..."
 
           sudo rm -rf /etc/x-ui
@@ -123,99 +128,185 @@ jobs:
           echo "Previous configuration restored."
           echo "=============================================="
 
-      - name: Set 3X-UI login credentials
+      - name: Reset 3X-UI credentials
         env:
           XUI_PANEL_USERNAME: ${{ secrets.XUI_PANEL_USERNAME }}
           XUI_PANEL_PASSWORD: ${{ secrets.XUI_PANEL_PASSWORD }}
         run: |
           set -e
 
-          echo "Resetting 3X-UI login credentials..."
+          echo "=============================================="
+          echo "RESETTING 3X-UI CREDENTIALS"
+          echo "=============================================="
 
-          sudo systemctl stop x-ui
+          sudo systemctl stop x-ui || true
 
-          sudo /usr/local/x-ui/x-ui setting \
+          sudo /usr/local/x-ui/x-ui setting -username "$XUI_PANEL_USERNAME" -password "$XUI_PANEL_PASSWORD" -resetTwoFactor=true
 
-          -username "$XUI_PANEL_USERNAME" \
-
-          -password "$XUI_PANEL_PASSWORD" \
-          -resetTwoFactor=true
-
-          echo "3X-UI credentials reset successfully."
+          echo "Username and password updated successfully."
+          echo "Two-factor authentication reset successfully."
 
           sudo systemctl start x-ui
 
           sleep 5
 
-          echo "Current panel settings:"
+          if ! sudo systemctl is-active --quiet x-ui; then
+            echo "ERROR: x-ui failed to start."
+            sudo journalctl -u x-ui --no-pager -n 100
+            exit 1
+          fi
 
-          sudo /usr/local/x-ui/x-ui setting -show true || true
+          echo "3X-UI is running."
 
-      - name: Start 3X-UI
+      - name: Read actual panel settings
         run: |
-          sudo systemctl enable x-ui
-          sudo systemctl restart x-ui
+          set -e
 
-          sleep 5
+          echo "=============================================="
+          echo "3X-UI SETTINGS"
+          echo "=============================================="
 
-      - name: Get 3X-UI panel information
+          sudo /usr/local/x-ui/x-ui setting -show true
+
+          echo
+          echo "=============================================="
+          echo "INSTALL RESULT"
+          echo "=============================================="
+
+          if sudo test -f /etc/x-ui/install-result.env; then
+            sudo cat /etc/x-ui/install-result.env
+          else
+            echo "install-result.env not found."
+          fi
+
+      - name: Verify 3X-UI login through API
+        env:
+          XUI_PANEL_USERNAME: ${{ secrets.XUI_PANEL_USERNAME }}
+          XUI_PANEL_PASSWORD: ${{ secrets.XUI_PANEL_PASSWORD }}
         run: |
+          set -e
+
           echo "=============================================="
-          echo "3X-UI PANEL SETTINGS"
+          echo "VERIFYING 3X-UI LOGIN"
           echo "=============================================="
 
-          sudo x-ui settings || true
+          PANEL_PORT=$(sudo /usr/local/x-ui/x-ui setting -show true 2>/dev/null \
+            | sed -n 's/.*port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+            | tail -1)
+
+          if [ -z "$PANEL_PORT" ]; then
+            PANEL_PORT=2053
+          fi
+
+          echo "Detected panel port: $PANEL_PORT"
+
+          BASE_PATH=$(sudo /usr/local/x-ui/x-ui setting -show true 2>/dev/null \
+            | sed -n 's/.*webBasePath:[[:space:]]*\(.*\)/\1/p' \
+            | tail -1 \
+            | tr -d '\r')
+
+          if [ -z "$BASE_PATH" ]; then
+            BASE_PATH="/"
+          fi
+
+          case "$BASE_PATH" in
+            /*) ;;
+            *) BASE_PATH="/$BASE_PATH" ;;
+          esac
+
+          BASE_PATH="${BASE_PATH%/}"
+
+          if [ -z "$BASE_PATH" ]; then
+            BASE_PATH="/"
+          fi
+
+          echo "Detected web base path: $BASE_PATH"
+
+          LOGIN_URL="http://127.0.0.1:${PANEL_PORT}${BASE_PATH}/login"
+
+          if [ "$BASE_PATH" = "/" ]; then
+            LOGIN_URL="http://127.0.0.1:${PANEL_PORT}/login"
+          fi
+
+          echo "Testing login endpoint..."
+
+          HTTP_CODE=$(curl \
+            -sS \
+            -o /tmp/xui-login-response.json \
+            -w "%{http_code}" \
+            --max-time 20 \
+            -c /tmp/xui-cookies.txt \
+            -H "Content-Type: application/json" \
+            -X POST \
+            "$LOGIN_URL" \
+            --data "$(python3 -c 'import json,os; print(json.dumps({"username":os.environ["XUI_PANEL_USERNAME"],"password":os.environ["XUI_PANEL_PASSWORD"]}))')")
+
+          echo "HTTP status: $HTTP_CODE"
+
+          echo "Login response:"
+
+          cat /tmp/xui-login-response.json
 
           echo
-          echo "=============================================="
-          echo "3X-UI LOGIN CREDENTIALS"
-          echo "=============================================="
 
-          echo "Username:"
-          echo "${{ secrets.XUI_PANEL_USERNAME }}"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: 3X-UI login HTTP request failed."
+            exit 1
+          fi
 
-          echo
-          echo "Password:"
-          echo "${{ secrets.XUI_PANEL_PASSWORD }}"
+          if ! grep -q '"success"[[:space:]]*:[[:space:]]*true' /tmp/xui-login-response.json; then
+            echo "ERROR: 3X-UI rejected the configured username/password."
+            exit 1
+          fi
 
-          echo
           echo "=============================================="
-          echo "CONFIG FILES"
-          echo "=============================================="
-
-          sudo find /etc/x-ui -maxdepth 2 -type f -print
-
-          echo
-          echo "=============================================="
-          echo "LISTENING PORTS"
+          echo "3X-UI LOGIN TEST: SUCCESS"
           echo "=============================================="
 
-          sudo ss -lntp | grep -E 'x-ui|LISTEN' || true
-
-          echo
-          echo "=============================================="
-          echo "PUBLIC IP"
-          echo "=============================================="
-
-          curl -4 -s https://api.ipify.org
-          echo
-
-      - name: Check 3X-UI
+      - name: Get panel access URL
+        id: panel-url
         run: |
+          set -e
+
+          PANEL_PORT=$(sudo /usr/local/x-ui/x-ui setting -show true 2>/dev/null \
+            | sed -n 's/.*port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+            | tail -1)
+
+          if [ -z "$PANEL_PORT" ]; then
+            PANEL_PORT=2053
+          fi
+
+          BASE_PATH=$(sudo /usr/local/x-ui/x-ui setting -show true 2>/dev/null \
+            | sed -n 's/.*webBasePath:[[:space:]]*\(.*\)/\1/p' \
+            | tail -1 \
+            | tr -d '\r')
+
+          if [ -z "$BASE_PATH" ]; then
+            BASE_PATH="/"
+          fi
+
+          case "$BASE_PATH" in
+            /*) ;;
+            *) BASE_PATH="/$BASE_PATH" ;;
+          esac
+
+          BASE_PATH="${BASE_PATH%/}"
+
+          if [ -z "$BASE_PATH" ]; then
+            BASE_PATH="/"
+          fi
+
+          echo "PANEL_PORT=$PANEL_PORT" >> "$GITHUB_OUTPUT"
+          echo "BASE_PATH=$BASE_PATH" >> "$GITHUB_OUTPUT"
+
           echo "=============================================="
-          echo "3X-UI STATUS"
+          echo "3X-UI PANEL"
           echo "=============================================="
 
-          sudo systemctl --no-pager status x-ui || true
+          echo "Port: $PANEL_PORT"
+          echo "Base path: $BASE_PATH"
 
-          echo
-          echo "=============================================="
-          echo "LISTENING PORTS"
-          echo "=============================================="
-
-          sudo ss -lntup || true
-
-      - name: Start Cloudflare Quick Tunnel
+      - name: Install cloudflared
         run: |
           set -e
 
@@ -232,22 +323,29 @@ jobs:
 
           sudo dpkg -i /tmp/cloudflared.deb
 
-          echo
+          cloudflared --version
+
+      - name: Start Cloudflare Quick Tunnel
+        run: |
+          set -e
+
+          PANEL_PORT="${{ steps.panel-url.outputs.PANEL_PORT }}"
+
           echo "=============================================="
           echo "STARTING CLOUDFLARE QUICK TUNNEL"
           echo "=============================================="
 
           nohup cloudflared tunnel \
-            --url http://127.0.0.1:2053 \
+            --url "http://127.0.0.1:${PANEL_PORT}" \
             > /tmp/cloudflared.log 2>&1 &
 
           CLOUDFLARED_PID=$!
 
           echo "$CLOUDFLARED_PID" > /tmp/cloudflared.pid
 
-          echo "Waiting for Cloudflare Tunnel..."
-
           TUNNEL_URL=""
+
+          echo "Waiting for Cloudflare Tunnel..."
 
           for i in $(seq 1 30); do
             sleep 2
@@ -262,33 +360,25 @@ jobs:
             fi
           done
 
-          echo
-          echo "=============================================="
-          echo "CLOUDFLARE PANEL URL"
-          echo "=============================================="
-
-          if [ -n "$TUNNEL_URL" ]; then
-            echo "$TUNNEL_URL"
-          else
+          if [ -z "$TUNNEL_URL" ]; then
             echo "ERROR: Cloudflare Tunnel URL was not detected."
             echo
             cat /tmp/cloudflared.log
             exit 1
           fi
 
+          echo "=============================================="
+          echo "CLOUDFLARE PANEL URL"
+          echo "=============================================="
+
+          echo "${TUNNEL_URL}${{ steps.panel-url.outputs.BASE_PATH }}"
+
           echo
           echo "=============================================="
           echo "CLOUDFLARE TUNNEL STATUS"
           echo "=============================================="
 
-          ps -p "$CLOUDFLARED_PID" || true
-
-          echo
-          echo "=============================================="
-          echo "CLOUDFLARE LOG"
-          echo "=============================================="
-
-          tail -50 /tmp/cloudflared.log || true
+          ps -p "$CLOUDFLARED_PID"
 
       - name: Create initial backup
         env:
@@ -343,6 +433,8 @@ jobs:
 
       - name: Commit initial backup
         run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -379,8 +471,16 @@ jobs:
               echo "Cloudflare Tunnel is not running."
               echo "Restarting..."
 
+              PANEL_PORT=$(sudo /usr/local/x-ui/x-ui setting -show true 2>/dev/null \
+                | sed -n 's/.*port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+                | tail -1)
+
+              if [ -z "$PANEL_PORT" ]; then
+                PANEL_PORT=2053
+              fi
+
               nohup cloudflared tunnel \
-                --url http://127.0.0.1:2053 \
+                --url "http://127.0.0.1:${PANEL_PORT}" \
                 > /tmp/cloudflared.log 2>&1 &
 
               sleep 10
@@ -438,7 +538,6 @@ jobs:
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
               git commit -m "Update 3X-UI backup"
-
               git push
 
               echo "Backup pushed to repository."
