@@ -33,6 +33,23 @@ jobs:
 
           mkdir -p .xui-backup
 
+      - name: Check panel credentials
+        env:
+          XUI_PANEL_USERNAME: ${{ secrets.XUI_PANEL_USERNAME }}
+          XUI_PANEL_PASSWORD: ${{ secrets.XUI_PANEL_PASSWORD }}
+        run: |
+          if [ -z "$XUI_PANEL_USERNAME" ]; then
+            echo "ERROR: XUI_PANEL_USERNAME secret is not configured."
+            exit 1
+          fi
+
+          if [ -z "$XUI_PANEL_PASSWORD" ]; then
+            echo "ERROR: XUI_PANEL_PASSWORD secret is not configured."
+            exit 1
+          fi
+
+          echo "Panel credentials are configured."
+
       - name: Install 3X-UI
         env:
           XUI_NONINTERACTIVE: "1"
@@ -106,6 +123,21 @@ jobs:
           echo "Previous configuration restored."
           echo "=============================================="
 
+      - name: Set 3X-UI login credentials
+        env:
+          XUI_PANEL_USERNAME: ${{ secrets.XUI_PANEL_USERNAME }}
+          XUI_PANEL_PASSWORD: ${{ secrets.XUI_PANEL_PASSWORD }}
+        run: |
+          set -e
+
+          echo "Setting 3X-UI username and password..."
+
+          sudo x-ui setting \
+            -username "$XUI_PANEL_USERNAME" \
+            -password "$XUI_PANEL_PASSWORD"
+
+          echo "3X-UI login credentials configured."
+
       - name: Start 3X-UI
         run: |
           sudo systemctl enable x-ui
@@ -126,11 +158,12 @@ jobs:
           echo "3X-UI LOGIN CREDENTIALS"
           echo "=============================================="
 
-          if sudo test -f /etc/x-ui/install-result.env; then
-            sudo cat /etc/x-ui/install-result.env
-          else
-            echo "install-result.env not found."
-          fi
+          echo "Username:"
+          echo "${{ secrets.XUI_PANEL_USERNAME }}"
+
+          echo
+          echo "Password:"
+          echo "${{ secrets.XUI_PANEL_PASSWORD }}"
 
           echo
           echo "=============================================="
@@ -168,6 +201,96 @@ jobs:
           echo "=============================================="
 
           sudo ss -lntup || true
+
+      - name: Start Cloudflare Quick Tunnel
+        run: |
+          set -e
+
+          echo "=============================================="
+          echo "INSTALLING CLOUDFLARED"
+          echo "=============================================="
+
+          curl -L \
+            --fail \
+            --show-error \
+            --silent \
+            -o /tmp/cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+
+          sudo dpkg -i /tmp/cloudflared.deb
+
+          echo
+          echo "=============================================="
+          echo "STARTING CLOUDFLARE QUICK TUNNEL"
+          echo "=============================================="
+
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:2053 \
+            > /tmp/cloudflared.log 2>&1 &
+
+          CLOUDFLARED_PID=$!
+
+          echo "$CLOUDFLARED_PID" > /tmp/cloudflared.pid
+
+          echo "Waiting for Cloudflare Tunnel..."
+
+          TUNNEL_URL=""
+
+          for i in $(seq 1 30); do
+            sleep 2
+
+            TUNNEL_URL=$(grep -oE \
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              /tmp/cloudflared.log \
+              | tail -1 || true)
+
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+          done
+
+          echo
+          echo "=============================================="
+          echo "CLOUDFLARE PANEL URL"
+          echo "=============================================="
+
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "$TUNNEL_URL"
+          else
+            echo "ERROR: Cloudflare Tunnel URL was not detected."
+            echo
+            cat /tmp/cloudflared.log
+            exit 1
+          fi
+
+          echo
+          echo "=============================================="
+          echo "CLOUDFLARE TUNNEL STATUS"
+          echo "=============================================="
+
+          ps -p "$CLOUDFLARED_PID" || true
+
+          echo
+          echo "=============================================="
+          echo "CLOUDFLARE LOG"
+          echo "=============================================="
+
+          tail -50 /tmp/cloudflared.log || true
+
+      - name: Test panel locally
+        run: |
+          echo "=============================================="
+          echo "LOCAL PANEL TEST"
+          echo "=============================================="
+
+          curl \
+            --fail \
+            --max-time 15 \
+            -I \
+            http://127.0.0.1:2053/
+
+          echo
+          echo "Local 3X-UI panel is reachable."
 
       - name: Create initial backup
         env:
@@ -252,6 +375,19 @@ jobs:
 
               sudo systemctl restart x-ui
               sleep 5
+            fi
+
+            if ! pgrep -x cloudflared > /dev/null; then
+              echo "Cloudflare Tunnel is not running."
+              echo "Restarting..."
+
+              nohup cloudflared tunnel \
+                --url http://127.0.0.1:2053 \
+                > /tmp/cloudflared.log 2>&1 &
+
+              sleep 10
+
+              echo "Cloudflare Tunnel restarted."
             fi
 
             echo "Creating periodic backup..."
