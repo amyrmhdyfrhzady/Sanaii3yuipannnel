@@ -1,0 +1,286 @@
+name: 3X-UI Persistent
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  3x-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl openssl git
+
+      - name: Check backup secret
+        env:
+          XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
+        run: |
+          if [ -z "$XUI_BACKUP_KEY" ]; then
+            echo "ERROR: XUI_BACKUP_KEY secret is not configured."
+            exit 1
+          fi
+
+          mkdir -p .xui-backup
+
+      - name: Install 3X-UI
+        env:
+          XUI_NONINTERACTIVE: "1"
+          XUI_SSL_MODE: "none"
+        run: |
+          curl -fsSL \
+            https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh \
+            | sudo -E bash
+
+      - name: Stop 3X-UI before restore
+        run: |
+          sudo systemctl stop x-ui || true
+
+      - name: Restore previous configuration
+        env:
+          XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
+        run: |
+          BACKUP=".xui-backup/x-ui-backup.tar.gz.enc"
+          CHECKSUM=".xui-backup/x-ui-backup.sha256"
+
+          if [ ! -f "$BACKUP" ]; then
+            echo "=============================================="
+            echo "No previous backup found."
+            echo "This is the first 3X-UI run."
+            echo "=============================================="
+            exit 0
+          fi
+
+          if [ ! -f "$CHECKSUM" ]; then
+            echo "ERROR: Backup checksum is missing."
+            exit 1
+          fi
+
+          echo "Checking SHA-256..."
+
+          sha256sum -c "$CHECKSUM"
+
+          echo "Checksum OK."
+
+          echo "Decrypting backup..."
+
+          openssl enc \
+            -d \
+            -aes-256-cbc \
+            -pbkdf2 \
+            -iter 600000 \
+            -in "$BACKUP" \
+            -out /tmp/x-ui-backup.tar.gz \
+            -pass "pass:$XUI_BACKUP_KEY"
+
+          echo "Restoring files..."
+
+          sudo rm -rf /etc/x-ui/*
+          sudo tar \
+            -xzf /tmp/x-ui-backup.tar.gz \
+            -C /etc
+
+          if [ -d /tmp/x-ui-cert ]; then
+            sudo mkdir -p /root/cert
+            sudo cp -a /tmp/x-ui-cert/. /root/cert/
+          fi
+
+          rm -f /tmp/x-ui-backup.tar.gz
+
+          sudo chown -R root:root /etc/x-ui
+
+          echo "=============================================="
+          echo "Previous configuration restored."
+          echo "=============================================="
+
+      - name: Start 3X-UI
+        run: |
+          sudo systemctl enable x-ui
+          sudo systemctl restart x-ui
+
+          sleep 5
+
+      - name: Check 3X-UI
+        run: |
+          echo "=============================================="
+          echo "3X-UI STATUS"
+          echo "=============================================="
+
+          sudo systemctl --no-pager status x-ui || true
+
+          echo
+          echo "=============================================="
+          echo "LISTENING PORTS"
+          echo "=============================================="
+
+          sudo ss -lntup || true
+
+      - name: Show panel credentials
+        run: |
+          echo
+          echo "=============================================="
+          echo "3X-UI PANEL INFORMATION"
+          echo "=============================================="
+
+          if [ -f /etc/x-ui/install-result.env ]; then
+            sudo cat /etc/x-ui/install-result.env
+          else
+            echo "install-result.env not found."
+          fi
+
+          echo
+          echo "=============================================="
+          echo "PUBLIC IP"
+          echo "=============================================="
+
+          curl -4 -s https://api.ipify.org
+          echo
+
+      - name: Create initial backup
+        env:
+          XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
+        run: |
+          set -e
+
+          sudo systemctl stop x-ui
+
+          rm -rf /tmp/xui-backup-work
+          mkdir -p /tmp/xui-backup-work
+          mkdir -p .xui-backup
+
+          echo "Creating 3X-UI backup..."
+
+          sudo cp -a /etc/x-ui \
+            /tmp/xui-backup-work/x-ui
+
+          if [ -d /root/cert ]; then
+            sudo cp -a /root/cert \
+              /tmp/xui-backup-work/cert
+          fi
+
+          sudo tar \
+            -czf /tmp/x-ui-backup.tar.gz \
+            -C /tmp/xui-backup-work \
+            .
+
+          openssl enc \
+            -aes-256-cbc \
+            -pbkdf2 \
+            -iter 600000 \
+            -salt \
+            -in /tmp/x-ui-backup.tar.gz \
+            -out .xui-backup/x-ui-backup.tar.gz.enc \
+            -pass "pass:$XUI_BACKUP_KEY"
+
+          sha256sum \
+            .xui-backup/x-ui-backup.tar.gz.enc \
+            > .xui-backup/x-ui-backup.sha256
+
+          rm -rf /tmp/xui-backup-work
+          rm -f /tmp/x-ui-backup.tar.gz
+
+          sudo systemctl start x-ui
+
+          echo "Initial backup completed."
+
+      - name: Commit initial backup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .xui-backup/
+
+          if git diff --cached --quiet; then
+            echo "No backup changes."
+          else
+            git commit -m "Update 3X-UI backup"
+            git push
+          fi
+
+      - name: Keep 3X-UI alive and backup periodically
+        env:
+          XUI_BACKUP_KEY: ${{ secrets.XUI_BACKUP_KEY }}
+        run: |
+          set -e
+
+          while true; do
+            echo
+            echo "=============================================="
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 3X-UI heartbeat"
+            echo "=============================================="
+
+            if ! sudo systemctl is-active --quiet x-ui; then
+              echo "3X-UI is not running."
+              echo "Restarting..."
+
+              sudo systemctl restart x-ui
+              sleep 5
+            fi
+
+            echo "Creating periodic backup..."
+
+            sudo systemctl stop x-ui
+
+            rm -rf /tmp/xui-backup-work
+            mkdir -p /tmp/xui-backup-work
+
+            sudo cp -a /etc/x-ui \
+              /tmp/xui-backup-work/x-ui
+
+            if [ -d /root/cert ]; then
+              sudo cp -a /root/cert \
+                /tmp/xui-backup-work/cert
+            fi
+
+            sudo tar \
+              -czf /tmp/x-ui-backup.tar.gz \
+              -C /tmp/xui-backup-work \
+              .
+
+            openssl enc \
+              -aes-256-cbc \
+              -pbkdf2 \
+              -iter 600000 \
+              -salt \
+              -in /tmp/x-ui-backup.tar.gz \
+              -out .xui-backup/x-ui-backup.tar.gz.enc \
+              -pass "pass:$XUI_BACKUP_KEY"
+
+            sha256sum \
+              .xui-backup/x-ui-backup.tar.gz.enc \
+              > .xui-backup/x-ui-backup.sha256
+
+            rm -rf /tmp/xui-backup-work
+            rm -f /tmp/x-ui-backup.tar.gz
+
+            sudo systemctl start x-ui
+
+            git add .xui-backup/
+
+            if git diff --cached --quiet; then
+              echo "No configuration changes."
+            else
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+              git commit -m "Update 3X-UI backup"
+
+              git push
+
+              echo "Backup pushed to repository."
+            fi
+
+            echo "Sleeping for 5 minutes..."
+
+            sleep 300
+          done
